@@ -1039,8 +1039,30 @@
     document.getElementById('schedule-status-filter')?.addEventListener('change', renderSchedulesList);
 
     // Reminder Settings
-    function saveReminderSettings() {
-      showToast('リマインド設定を保存しました');
+    async function saveReminderSettings() {
+      const settings = {
+        type: 'reminder_settings',
+        remind_24h: document.getElementById('reminder-24h')?.checked || false,
+        remind_3h:  document.getElementById('reminder-3h')?.checked  || false,
+        remind_1h:  document.getElementById('reminder-1h')?.checked  || false,
+        template_24h: document.getElementById('template-24h')?.value || '',
+        updated_at: new Date().toISOString(),
+        created_at: new Date().toISOString()
+      };
+
+      const existing = getDataByType('reminder_settings')[0];
+      let result;
+      if (existing) {
+        result = await window.dataSdk.update({ ...existing, ...settings });
+      } else {
+        result = await window.dataSdk.create(settings);
+      }
+
+      if (result.isOk) {
+        showToast('リマインド設定を保存しました');
+      } else {
+        showToast('保存に失敗しました', 'error');
+      }
     }
 
     // Notifications Management

@@ -1,16 +1,12 @@
 {
   "name": "creatte-haisin",
   "version": "1.0.0",
-  "description": "授業リマインドシステム - Netlify版",
+  "description": "授業リマインドシステム - Netlify版（外部npm依存なし）",
   "private": true,
   "scripts": {
     "dev": "netlify dev"
   },
-  "dependencies": {
-    "firebase-admin": "^12.0.0"
-  },
   "devDependencies": {
-    "@netlify/functions": "^2.0.0",
     "netlify-cli": "^17.0.0"
   }
 }
