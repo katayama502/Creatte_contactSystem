@@ -1,0 +1,1187 @@
+<!doctype html>
+<html lang="ja" class="h-full">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>授業リマインドシステム</title>
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js';
+    import { getFirestore, collection, addDoc, getDocs, updateDoc, deleteDoc, doc, onSnapshot, query, orderBy } from 'https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js';
+
+    // =====================================================
+    // Firebase設定（Firebase Consoleから取得した値を入力）
+    // https://console.firebase.google.com/
+    // =====================================================
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.appspot.com",
+      messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    // Firebaseを初期化
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    const COLLECTION = 'system_data';
+
+    // =====================================================
+    // dataSdk 互換レイヤー（既存コードを変更不要にするため）
+    // =====================================================
+    window.dataSdk = {
+      _handler: null,
+      _unsubscribe: null,
+
+      async init(handler) {
+        window.dataSdk._handler = handler;
+        try {
+          const q = query(collection(db, COLLECTION), orderBy('created_at', 'asc'));
+          window.dataSdk._unsubscribe = onSnapshot(q, (snapshot) => {
+            const data = snapshot.docs.map(d => ({ __backendId: d.id, ...d.data() }));
+            if (handler && handler.onDataChanged) {
+              handler.onDataChanged(data);
+            }
+          });
+          return { isOk: true };
+        } catch (e) {
+          console.error('Firebase初期化エラー:', e);
+          return { isOk: false, error: e };
+        }
+      },
+
+      async create(data) {
+        try {
+          const { __backendId, ...cleanData } = data;
+          const docRef = await addDoc(collection(db, COLLECTION), cleanData);
+          return { isOk: true, id: docRef.id };
+        } catch (e) {
+          console.error('作成エラー:', e);
+          return { isOk: false, error: e };
+        }
+      },
+
+      async update(data) {
+        try {
+          const { __backendId, ...cleanData } = data;
+          const docRef = doc(db, COLLECTION, __backendId);
+          await updateDoc(docRef, cleanData);
+          return { isOk: true };
+        } catch (e) {
+          console.error('更新エラー:', e);
+          return { isOk: false, error: e };
+        }
+      },
+
+      async delete(data) {
+        try {
+          const docRef = doc(db, COLLECTION, data.__backendId);
+          await deleteDoc(docRef);
+          return { isOk: true };
+        } catch (e) {
+          console.error('削除エラー:', e);
+          return { isOk: false, error: e };
+        }
+      }
+    };
+
+    // elementSdk スタブ（設定変更機能はシンプルに対応）
+    window.elementSdk = {
+      init(options) {
+        if (options && options.onConfigChange) {
+          const config = {
+            system_title: localStorage.getItem('system_title') || options.defaultConfig?.system_title || '授業リマインドシステム',
+            school_name: localStorage.getItem('school_name') || options.defaultConfig?.school_name || '学習塾'
+          };
+          options.onConfigChange(config);
+        }
+      }
+    };
+
+    // DOMContentLoaded後にinitAppを実行
+    document.addEventListener('DOMContentLoaded', () => {
+      if (typeof initApp === 'function') initApp();
+    });
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;600;700&amp;display=swap" rel="stylesheet">
+  <style>
+    * { font-family: 'Noto Sans JP', sans-serif; }
+    .sidebar-item { transition: all 0.2s ease; }
+    .sidebar-item:hover { transform: translateX(4px); }
+    .card-hover { transition: all 0.3s ease; }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .pulse-dot { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    input:focus, select:focus, textarea:focus { outline: none; box-shadow: 0 0 0 3px rgba(0, 195, 95, 0.2); }
+    .btn-primary { transition: all 0.2s ease; }
+    .btn-primary:hover { transform: scale(1.02); }
+    .btn-primary:active { transform: scale(0.98); }
+    .loading-spinner { border: 3px solid #f3f3f3; border-top: 3px solid #00c35f; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; display: inline-block; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+  <style>body { box-sizing: border-box; }</style>
+ </head>
+ <body class="h-full bg-slate-50 overflow-auto">
+  <div class="flex h-full w-full"><!-- Sidebar -->
+   <aside class="w-64 bg-gradient-to-b from-emerald-600 to-emerald-700 text-white flex-shrink-0 flex flex-col">
+    <div class="p-6 border-b border-emerald-500">
+     <div class="flex items-center gap-3">
+      <div class="w-10 h-10 bg-white rounded-xl flex items-center justify-center">
+       <svg class="w-6 h-6 text-emerald-600" fill="currentColor" viewbox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" />
+       </svg>
+      </div>
+      <div>
+       <h1 id="sidebar-title" class="font-bold text-lg">リマインドシステム</h1>
+       <p id="sidebar-school" class="text-emerald-200 text-xs">管理画面</p>
+      </div>
+     </div>
+    </div>
+    <nav class="flex-1 p-4 space-y-2"><button onclick="showSection('dashboard')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg bg-emerald-500/30 text-white">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />
+      </svg><span>ダッシュボード</span> </button> <button onclick="showSection('api-settings')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+      </svg><span>LINE API設定</span> </button> <button onclick="showSection('students')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+      </svg><span>生徒管理</span> </button> <button onclick="showSection('schedules')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+      </svg><span>授業スケジュール</span> </button> <button onclick="showSection('reminders')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+      </svg><span>リマインド設定</span> </button> <button onclick="showSection('notifications')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
+      </svg><span>イベント告知</span> </button> <button onclick="showSection('logs')" class="sidebar-item w-full flex items-center gap-3 px-4 py-3 rounded-lg hover:bg-emerald-500/20 text-emerald-100">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+      </svg><span>送信ログ</span> </button>
+    </nav>
+    <div class="p-4 border-t border-emerald-500">
+     <div class="flex items-center gap-3 px-4 py-2">
+      <div class="w-8 h-8 bg-emerald-500 rounded-full flex items-center justify-center text-sm font-bold">
+       管
+      </div>
+      <div class="text-sm">
+       <p class="font-medium">管理者</p>
+       <p class="text-emerald-200 text-xs">オンライン</p>
+      </div>
+     </div>
+    </div>
+   </aside><!-- Main Content -->
+   <main class="flex-1 overflow-auto"><!-- Dashboard Section -->
+    <section id="section-dashboard" class="p-8 fade-in">
+     <div class="mb-8">
+      <h2 class="text-2xl font-bold text-slate-800">ダッシュボード</h2>
+      <p class="text-slate-500 mt-1">システムの概要と今日の予定</p>
+     </div><!-- Stats Cards -->
+     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+      <div class="card-hover bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
+       <div class="flex items-center justify-between mb-4">
+        <div class="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center">
+         <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+         </svg>
+        </div><span class="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-1 rounded-full">+12%</span>
+       </div>
+       <p id="stat-students" class="text-3xl font-bold text-slate-800">0</p>
+       <p class="text-slate-500 text-sm mt-1">登録生徒数</p>
+      </div>
+      <div class="card-hover bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
+       <div class="flex items-center justify-between mb-4">
+        <div class="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center">
+         <svg class="w-6 h-6 text-emerald-600" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+         </svg>
+        </div><span class="text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">本日</span>
+       </div>
+       <p id="stat-today-classes" class="text-3xl font-bold text-slate-800">0</p>
+       <p class="text-slate-500 text-sm mt-1">今日の授業数</p>
+      </div>
+      <div class="card-hover bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
+       <div class="flex items-center justify-between mb-4">
+        <div class="w-12 h-12 bg-amber-100 rounded-xl flex items-center justify-center">
+         <svg class="w-6 h-6 text-amber-600" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+         </svg>
+        </div><span class="text-xs font-medium text-amber-600 bg-amber-50 px-2 py-1 rounded-full">予定</span>
+       </div>
+       <p id="stat-pending-reminders" class="text-3xl font-bold text-slate-800">0</p>
+       <p class="text-slate-500 text-sm mt-1">送信予定リマインド</p>
+      </div>
+      <div class="card-hover bg-white rounded-2xl p-6 shadow-sm border border-slate-100">
+       <div class="flex items-center justify-between mb-4">
+        <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+         <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+         </svg>
+        </div><span id="api-status-badge" class="text-xs font-medium text-slate-600 bg-slate-100 px-2 py-1 rounded-full">未設定</span>
+       </div>
+       <p id="stat-api-status" class="text-3xl font-bold text-slate-800">--</p>
+       <p class="text-slate-500 text-sm mt-1">API接続状況</p>
+      </div>
+     </div><!-- Today's Schedule -->
+     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div class="p-6 border-b border-slate-100">
+       <h3 class="text-lg font-bold text-slate-800">今日の授業スケジュール</h3>
+      </div>
+      <div id="today-schedule-list" class="divide-y divide-slate-100">
+       <div class="p-8 text-center text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        <p>今日の授業はまだ登録されていません</p>
+       </div>
+      </div>
+     </div>
+    </section><!-- API Settings Section -->
+    <section id="section-api-settings" class="p-8 fade-in hidden">
+     <div class="mb-8">
+      <h2 class="text-2xl font-bold text-slate-800">LINE API設定</h2>
+      <p class="text-slate-500 mt-1">LINE Messaging APIの接続設定を行います</p>
+     </div>
+     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+       <h3 class="text-lg font-bold text-slate-800 mb-6">基本設定</h3>
+       <form id="api-settings-form" class="space-y-5">
+        <div><label class="block text-sm font-medium text-slate-700 mb-2">Channel ID</label> <input type="text" id="channel-id" placeholder="1234567890" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors">
+        </div>
+        <div><label class="block text-sm font-medium text-slate-700 mb-2">Channel Secret</label> <input type="password" id="channel-secret" placeholder="••••••••••••••••" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors">
+        </div>
+        <div><label class="block text-sm font-medium text-slate-700 mb-2">チャネルアクセストークン</label> <textarea id="access-token" rows="3" placeholder="トークンを入力..." class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors resize-none"></textarea>
+        </div>
+        <div><label class="block text-sm font-medium text-slate-700 mb-2">Webhook URL</label>
+         <div class="flex gap-2"><input type="text" id="webhook-url" placeholder="https://your-server.com/webhook" class="flex-1 px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <button type="button" onclick="generateWebhookUrl()" class="px-4 py-3 bg-slate-100 text-slate-600 rounded-xl hover:bg-slate-200 transition-colors">
+           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+           </svg></button>
+         </div>
+        </div>
+        <div class="flex gap-3 pt-4"><button type="submit" id="save-api-btn" class="btn-primary flex-1 bg-emerald-600 text-white py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors"> <span class="btn-text">設定を保存</span> </button> <button type="button" onclick="testConnection()" class="px-6 py-3 border border-emerald-600 text-emerald-600 rounded-xl font-medium hover:bg-emerald-50 transition-colors"> 接続テスト </button>
+        </div>
+       </form>
+      </div>
+      <div class="space-y-6">
+       <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+        <h3 class="text-lg font-bold text-slate-800 mb-4">接続ステータス</h3>
+        <div id="connection-status" class="flex items-center gap-3 p-4 bg-slate-50 rounded-xl">
+         <div class="w-3 h-3 bg-slate-400 rounded-full"></div><span class="text-slate-600">未設定</span>
+        </div>
+       </div>
+       <div class="bg-gradient-to-br from-emerald-500 to-emerald-600 rounded-2xl p-6 text-white">
+        <h3 class="text-lg font-bold mb-3">📚 設定ガイド</h3>
+        <ol class="space-y-2 text-emerald-50 text-sm">
+         <li>1. LINE Developersコンソールにログイン</li>
+         <li>2. Messaging APIチャネルを作成</li>
+         <li>3. チャネル基本設定からID・Secretを取得</li>
+         <li>4. Messaging API設定からトークンを発行</li>
+         <li>5. Webhook URLを設定して有効化</li>
+        </ol><a href="https://developers.line.biz/console/" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 mt-4 px-4 py-2 bg-white/20 rounded-lg hover:bg-white/30 transition-colors text-sm"> LINE Developers → </a>
+       </div>
+      </div>
+     </div>
+    </section><!-- Students Section -->
+    <section id="section-students" class="p-8 fade-in hidden">
+     <div class="flex items-center justify-between mb-8">
+      <div>
+       <h2 class="text-2xl font-bold text-slate-800">生徒管理</h2>
+       <p class="text-slate-500 mt-1">生徒情報の登録・編集を行います</p>
+      </div><button onclick="showStudentModal()" class="btn-primary flex items-center gap-2 bg-emerald-600 text-white px-5 py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors">
+       <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+       </svg> 新規登録 </button>
+     </div>
+     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div class="p-4 border-b border-slate-100 flex gap-4">
+       <div class="flex-1 relative">
+        <svg class="w-5 h-5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg><input type="text" id="student-search" placeholder="生徒名で検索..." class="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors">
+       </div><select id="student-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <option value="">全てのコース</option> <option value="数学">数学</option> <option value="英語">英語</option> <option value="国語">国語</option> <option value="理科">理科</option> <option value="社会">社会</option> </select>
+      </div>
+      <div id="students-list" class="divide-y divide-slate-100">
+       <div class="p-8 text-center text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+        </svg>
+        <p>生徒がまだ登録されていません</p><button onclick="showStudentModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の生徒を登録 →</button>
+       </div>
+      </div>
+     </div>
+    </section><!-- Schedules Section -->
+    <section id="section-schedules" class="p-8 fade-in hidden">
+     <div class="flex items-center justify-between mb-8">
+      <div>
+       <h2 class="text-2xl font-bold text-slate-800">授業スケジュール</h2>
+       <p class="text-slate-500 mt-1">授業の登録・管理を行います</p>
+      </div><button onclick="showScheduleModal()" class="btn-primary flex items-center gap-2 bg-emerald-600 text-white px-5 py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors">
+       <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+       </svg> 新規授業 </button>
+     </div>
+     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div class="p-4 border-b border-slate-100 flex gap-4 flex-wrap"><input type="date" id="schedule-date-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <select id="schedule-instructor-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <option value="">全ての講師</option> <option value="田中先生">田中先生</option> <option value="鈴木先生">鈴木先生</option> <option value="佐藤先生">佐藤先生</option> </select> <select id="schedule-status-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <option value="">全てのステータス</option> <option value="予定">予定</option> <option value="完了">完了</option> <option value="欠席">欠席</option> <option value="振替待ち">振替待ち</option> </select>
+      </div>
+      <div id="schedules-list" class="divide-y divide-slate-100">
+       <div class="p-8 text-center text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+        </svg>
+        <p>授業がまだ登録されていません</p><button onclick="showScheduleModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の授業を登録 →</button>
+       </div>
+      </div>
+     </div>
+    </section><!-- Reminders Section -->
+    <section id="section-reminders" class="p-8 fade-in hidden">
+     <div class="mb-8">
+      <h2 class="text-2xl font-bold text-slate-800">リマインド設定</h2>
+      <p class="text-slate-500 mt-1">自動リマインドの送信タイミングとテンプレートを設定します</p>
+     </div>
+     <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+       <h3 class="text-lg font-bold text-slate-800 mb-6">送信タイミング設定</h3>
+       <div class="space-y-4"><label class="flex items-center justify-between p-4 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
+         <div class="flex items-center gap-3"><input type="checkbox" id="reminder-24h" checked class="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500">
+          <div>
+           <p class="font-medium text-slate-800">24時間前</p>
+           <p class="text-sm text-slate-500">授業の前日に送信</p>
+          </div>
+         </div><span class="text-emerald-600 text-sm font-medium">有効</span> </label> <label class="flex items-center justify-between p-4 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
+         <div class="flex items-center gap-3"><input type="checkbox" id="reminder-3h" checked class="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500">
+          <div>
+           <p class="font-medium text-slate-800">3時間前</p>
+           <p class="text-sm text-slate-500">当日の直前に送信</p>
+          </div>
+         </div><span class="text-emerald-600 text-sm font-medium">有効</span> </label> <label class="flex items-center justify-between p-4 bg-slate-50 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
+         <div class="flex items-center gap-3"><input type="checkbox" id="reminder-1h" class="w-5 h-5 text-emerald-600 rounded focus:ring-emerald-500">
+          <div>
+           <p class="font-medium text-slate-800">1時間前</p>
+           <p class="text-sm text-slate-500">授業の直前に送信</p>
+          </div>
+         </div><span class="text-slate-400 text-sm">無効</span> </label>
+       </div>
+      </div>
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+       <h3 class="text-lg font-bold text-slate-800 mb-6">メッセージテンプレート</h3>
+       <div class="space-y-4">
+        <div><label class="block text-sm font-medium text-slate-700 mb-2">24時間前メッセージ</label> <textarea id="template-24h" rows="4" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors resize-none">{生徒名}さん、明日の授業のお知らせです。
+
+📅 {日時}
+📚 {科目}
+👨‍🏫 {担当講師}
+
+ご予定の変更がある場合は、メニューからお手続きください。</textarea>
+        </div>
+        <div class="flex flex-wrap gap-2"><span class="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">{生徒名}</span> <span class="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">{日時}</span> <span class="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">{科目}</span> <span class="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">{担当講師}</span>
+        </div><button onclick="saveReminderSettings()" class="btn-primary w-full bg-emerald-600 text-white py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors"> 設定を保存 </button>
+       </div>
+      </div>
+     </div>
+    </section><!-- Notifications Section -->
+    <section id="section-notifications" class="p-8 fade-in hidden">
+     <div class="flex items-center justify-between mb-8">
+      <div>
+       <h2 class="text-2xl font-bold text-slate-800">イベント告知</h2>
+       <p class="text-slate-500 mt-1">特別イベントや一斉通知を配信します</p>
+      </div><button onclick="showNotificationModal()" class="btn-primary flex items-center gap-2 bg-emerald-600 text-white px-5 py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors">
+       <svg class="w-5 h-5" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+       </svg> 新規告知 </button>
+     </div>
+     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div id="notifications-list" class="divide-y divide-slate-100">
+       <div class="p-8 text-center text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z" />
+        </svg>
+        <p>告知がまだ作成されていません</p><button onclick="showNotificationModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の告知を作成 →</button>
+       </div>
+      </div>
+     </div>
+    </section><!-- Logs Section -->
+    <section id="section-logs" class="p-8 fade-in hidden">
+     <div class="mb-8">
+      <h2 class="text-2xl font-bold text-slate-800">送信ログ</h2>
+      <p class="text-slate-500 mt-1">メッセージの送信履歴を確認します</p>
+     </div>
+     <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <div class="p-4 border-b border-slate-100 flex gap-4 flex-wrap"><input type="date" id="log-date-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <select id="log-type-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <option value="">全てのタイプ</option> <option value="リマインド">リマインド</option> <option value="告知">告知</option> </select> <select id="log-status-filter" class="px-4 py-2 border border-slate-200 rounded-lg focus:border-emerald-500 transition-colors"> <option value="">全てのステータス</option> <option value="成功">成功</option> <option value="失敗">失敗</option> <option value="保留">保留</option> </select>
+      </div>
+      <div id="logs-list" class="divide-y divide-slate-100">
+       <div class="p-8 text-center text-slate-400">
+        <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+        </svg>
+        <p>送信ログがありません</p>
+       </div>
+      </div>
+     </div>
+    </section>
+   </main>
+  </div><!-- Student Modal -->
+  <div id="student-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+   <div class="bg-white rounded-2xl w-full max-w-md mx-4 overflow-hidden fade-in">
+    <div class="p-6 border-b border-slate-100 flex items-center justify-between">
+     <h3 class="text-lg font-bold text-slate-800">生徒登録</h3><button onclick="closeModal('student-modal')" class="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+      <svg class="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+      </svg></button>
+    </div>
+    <form id="student-form" class="p-6 space-y-4"><input type="hidden" id="student-edit-id" value="">
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">生徒名 <span class="text-red-500">*</span></label> <input type="text" id="student-name" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors" placeholder="山田 太郎">
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">LINE UserID</label> <input type="text" id="student-line-id" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors" placeholder="U1234567890abc...">
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">コース <span class="text-red-500">*</span></label> <select id="student-course" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="">選択してください</option> <option value="数学">数学</option> <option value="英語">英語</option> <option value="国語">国語</option> <option value="理科">理科</option> <option value="社会">社会</option> <option value="総合">総合（複数科目）</option> </select>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">ステータス</label> <select id="student-status" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="有効">有効</option> <option value="休会">休会</option> <option value="退会">退会</option> </select>
+     </div>
+     <div class="flex gap-3 pt-4"><button type="button" onclick="closeModal('student-modal')" class="flex-1 py-3 border border-slate-200 rounded-xl font-medium text-slate-600 hover:bg-slate-50 transition-colors">キャンセル</button> <button type="submit" id="save-student-btn" class="btn-primary flex-1 bg-emerald-600 text-white py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors"> <span class="btn-text">保存</span> </button>
+     </div>
+    </form>
+   </div>
+  </div><!-- Schedule Modal -->
+  <div id="schedule-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+   <div class="bg-white rounded-2xl w-full max-w-md mx-4 overflow-hidden fade-in">
+    <div class="p-6 border-b border-slate-100 flex items-center justify-between">
+     <h3 class="text-lg font-bold text-slate-800">授業登録</h3><button onclick="closeModal('schedule-modal')" class="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+      <svg class="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+      </svg></button>
+    </div>
+    <form id="schedule-form" class="p-6 space-y-4"><input type="hidden" id="schedule-edit-id" value="">
+     <div class="grid grid-cols-2 gap-4">
+      <div><label class="block text-sm font-medium text-slate-700 mb-2">日付 <span class="text-red-500">*</span></label> <input type="date" id="schedule-date" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors">
+      </div>
+      <div><label class="block text-sm font-medium text-slate-700 mb-2">時間 <span class="text-red-500">*</span></label> <input type="time" id="schedule-time" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors">
+      </div>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">生徒 <span class="text-red-500">*</span></label> <select id="schedule-student" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="">選択してください</option> </select>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">科目 <span class="text-red-500">*</span></label> <select id="schedule-subject" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="">選択してください</option> <option value="数学">数学</option> <option value="英語">英語</option> <option value="国語">国語</option> <option value="理科">理科</option> <option value="社会">社会</option> </select>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">担当講師 <span class="text-red-500">*</span></label> <select id="schedule-instructor" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="">選択してください</option> <option value="田中先生">田中先生</option> <option value="鈴木先生">鈴木先生</option> <option value="佐藤先生">佐藤先生</option> </select>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">出欠ステータス</label> <select id="schedule-attendance" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="予定">予定</option> <option value="完了">完了</option> <option value="欠席">欠席</option> <option value="振替待ち">振替待ち</option> </select>
+     </div>
+     <div class="flex gap-3 pt-4"><button type="button" onclick="closeModal('schedule-modal')" class="flex-1 py-3 border border-slate-200 rounded-xl font-medium text-slate-600 hover:bg-slate-50 transition-colors">キャンセル</button> <button type="submit" id="save-schedule-btn" class="btn-primary flex-1 bg-emerald-600 text-white py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors"> <span class="btn-text">保存</span> </button>
+     </div>
+    </form>
+   </div>
+  </div><!-- Notification Modal -->
+  <div id="notification-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+   <div class="bg-white rounded-2xl w-full max-w-lg mx-4 overflow-hidden fade-in">
+    <div class="p-6 border-b border-slate-100 flex items-center justify-between">
+     <h3 class="text-lg font-bold text-slate-800">イベント告知作成</h3><button onclick="closeModal('notification-modal')" class="p-2 hover:bg-slate-100 rounded-lg transition-colors">
+      <svg class="w-5 h-5 text-slate-500" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+      </svg></button>
+    </div>
+    <form id="notification-form" class="p-6 space-y-4">
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">配信対象</label> <select id="notification-target" class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <option value="全生徒">全生徒</option> <option value="数学コース">数学コース</option> <option value="英語コース">英語コース</option> <option value="国語コース">国語コース</option> </select>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">送信日時</label>
+      <div class="grid grid-cols-2 gap-4"><input type="date" id="notification-date" class="px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors"> <input type="time" id="notification-time" class="px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors">
+      </div>
+      <p class="text-xs text-slate-500 mt-1">空欄の場合は即時送信されます</p>
+     </div>
+     <div><label class="block text-sm font-medium text-slate-700 mb-2">メッセージ内容 <span class="text-red-500">*</span></label> <textarea id="notification-content" rows="5" required class="w-full px-4 py-3 border border-slate-200 rounded-xl focus:border-emerald-500 transition-colors resize-none" placeholder="告知内容を入力..."></textarea>
+     </div>
+     <div class="flex gap-3 pt-4"><button type="button" onclick="closeModal('notification-modal')" class="flex-1 py-3 border border-slate-200 rounded-xl font-medium text-slate-600 hover:bg-slate-50 transition-colors">キャンセル</button> <button type="submit" id="save-notification-btn" class="btn-primary flex-1 bg-emerald-600 text-white py-3 rounded-xl font-medium hover:bg-emerald-700 transition-colors"> <span class="btn-text">作成</span> </button>
+     </div>
+    </form>
+   </div>
+  </div><!-- Toast Container -->
+  <div id="toast-container" class="fixed bottom-4 right-4 z-50 space-y-2"></div><!-- Delete Confirmation Modal -->
+  <div id="delete-confirm-modal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 hidden">
+   <div class="bg-white rounded-2xl w-full max-w-sm mx-4 overflow-hidden fade-in">
+    <div class="p-6 text-center">
+     <div class="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
+      <svg class="w-8 h-8 text-red-600" fill="none" stroke="currentColor" viewbox="0 0 24 24">
+       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+     </div>
+     <h3 class="text-lg font-bold text-slate-800 mb-2">削除の確認</h3>
+     <p id="delete-confirm-message" class="text-slate-500 mb-6">このデータを削除しますか？この操作は取り消せません。</p>
+     <div class="flex gap-3"><button onclick="closeModal('delete-confirm-modal')" class="flex-1 py-3 border border-slate-200 rounded-xl font-medium text-slate-600 hover:bg-slate-50 transition-colors">キャンセル</button> <button id="delete-confirm-btn" class="flex-1 py-3 bg-red-600 text-white rounded-xl font-medium hover:bg-red-700 transition-colors">削除する</button>
+     </div>
+    </div>
+   </div>
+  </div>
+  <script>
+    // Global state
+    let allData = [];
+    let currentDeleteTarget = null;
+    
+    // Default config
+    const defaultConfig = {
+      system_title: '授業リマインドシステム',
+      school_name: '学習塾'
+    };
+
+    // Initialize Element SDK
+    if (window.elementSdk) {
+      window.elementSdk.init({
+        defaultConfig,
+        onConfigChange: async (config) => {
+          document.getElementById('sidebar-title').textContent = config.system_title || defaultConfig.system_title;
+          document.getElementById('sidebar-school').textContent = config.school_name || defaultConfig.school_name;
+        },
+        mapToCapabilities: (config) => ({
+          recolorables: [],
+          borderables: [],
+          fontEditable: undefined,
+          fontSizeable: undefined
+        }),
+        mapToEditPanelValues: (config) => new Map([
+          ['system_title', config.system_title || defaultConfig.system_title],
+          ['school_name', config.school_name || defaultConfig.school_name]
+        ])
+      });
+    }
+
+    // Data SDK Handler
+    const dataHandler = {
+      onDataChanged(data) {
+        allData = data;
+        updateDashboard();
+        renderStudentsList();
+        renderSchedulesList();
+        renderNotificationsList();
+        renderLogsList();
+        updateStudentDropdown();
+        updateApiStatus();
+      }
+    };
+
+    // Initialize Data SDK
+    async function initApp() {
+      if (window.dataSdk) {
+        const result = await window.dataSdk.init(dataHandler);
+        if (!result.isOk) {
+          showToast('データの読み込みに失敗しました', 'error');
+        }
+      }
+    }
+    
+    // initApp()はFirebase moduleスクリプトのDOMContentLoadedから呼ばれます
+    // initApp(); // ← 直接呼び出しは不要
+
+    // Helper functions
+    function getDataByType(type) {
+      return allData.filter(item => item.type === type);
+    }
+
+    function showSection(sectionId) {
+      // Hide all sections
+      document.querySelectorAll('main > section').forEach(section => {
+        section.classList.add('hidden');
+      });
+      
+      // Show selected section
+      const targetSection = document.getElementById(`section-${sectionId}`);
+      if (targetSection) {
+        targetSection.classList.remove('hidden');
+      }
+      
+      // Update sidebar
+      document.querySelectorAll('.sidebar-item').forEach((item, index) => {
+        const sectionNames = ['dashboard', 'api-settings', 'students', 'schedules', 'reminders', 'notifications', 'logs'];
+        if (sectionNames[index] === sectionId) {
+          item.classList.add('bg-emerald-500/30', 'text-white');
+          item.classList.remove('hover:bg-emerald-500/20', 'text-emerald-100');
+        } else {
+          item.classList.remove('bg-emerald-500/30', 'text-white');
+          item.classList.add('hover:bg-emerald-500/20', 'text-emerald-100');
+        }
+      });
+    }
+
+    function showToast(message, type = 'success') {
+      const container = document.getElementById('toast-container');
+      const toast = document.createElement('div');
+      const bgColor = type === 'success' ? 'bg-emerald-600' : type === 'error' ? 'bg-red-600' : 'bg-amber-600';
+      toast.className = `${bgColor} text-white px-6 py-3 rounded-xl shadow-lg fade-in flex items-center gap-3`;
+      
+      const icon = type === 'success' ? 
+        '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>' :
+        '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>';
+      
+      toast.innerHTML = `${icon}<span>${message}</span>`;
+      container.appendChild(toast);
+      
+      setTimeout(() => {
+        toast.style.opacity = '0';
+        toast.style.transform = 'translateX(100%)';
+        toast.style.transition = 'all 0.3s ease';
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
+    function closeModal(modalId) {
+      document.getElementById(modalId).classList.add('hidden');
+    }
+
+    function formatDate(dateStr) {
+      if (!dateStr) return '';
+      const date = new Date(dateStr);
+      return date.toLocaleDateString('ja-JP', { year: 'numeric', month: 'long', day: 'numeric' });
+    }
+
+    function formatTime(timeStr) {
+      if (!timeStr) return '';
+      return timeStr;
+    }
+
+    // Dashboard
+    function updateDashboard() {
+      const students = getDataByType('student');
+      const schedules = getDataByType('schedule');
+      const notifications = getDataByType('notification');
+      
+      document.getElementById('stat-students').textContent = students.length;
+      
+      const today = new Date().toISOString().split('T')[0];
+      const todayClasses = schedules.filter(s => s.schedule_date === today);
+      document.getElementById('stat-today-classes').textContent = todayClasses.length;
+      
+      const pendingNotifications = notifications.filter(n => n.notification_status === '保留');
+      document.getElementById('stat-pending-reminders').textContent = pendingNotifications.length;
+      
+      // Render today's schedule
+      const todayScheduleList = document.getElementById('today-schedule-list');
+      if (todayClasses.length === 0) {
+        todayScheduleList.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            <p>今日の授業はまだ登録されていません</p>
+          </div>`;
+      } else {
+        todayScheduleList.innerHTML = todayClasses.map(schedule => `
+          <div class="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+            <div class="flex items-center gap-4">
+              <div class="w-12 h-12 bg-emerald-100 rounded-xl flex items-center justify-center text-emerald-600 font-bold">
+                ${schedule.schedule_time ? schedule.schedule_time.substring(0, 5) : '--:--'}
+              </div>
+              <div>
+                <p class="font-medium text-slate-800">${schedule.student_name || '未設定'}</p>
+                <p class="text-sm text-slate-500">${schedule.subject || ''} - ${schedule.instructor || ''}</p>
+              </div>
+            </div>
+            <span class="px-3 py-1 text-xs font-medium rounded-full ${getStatusColor(schedule.attendance)}">${schedule.attendance || '予定'}</span>
+          </div>
+        `).join('');
+      }
+    }
+
+    function getStatusColor(status) {
+      switch(status) {
+        case '完了': return 'bg-emerald-100 text-emerald-700';
+        case '欠席': return 'bg-red-100 text-red-700';
+        case '振替待ち': return 'bg-amber-100 text-amber-700';
+        default: return 'bg-blue-100 text-blue-700';
+      }
+    }
+
+    // API Settings
+    function updateApiStatus() {
+      const apiSettings = getDataByType('api_settings')[0];
+      const statusEl = document.getElementById('connection-status');
+      const statEl = document.getElementById('stat-api-status');
+      const badgeEl = document.getElementById('api-status-badge');
+      
+      if (apiSettings && apiSettings.channel_id && apiSettings.access_token) {
+        statusEl.innerHTML = `
+          <div class="w-3 h-3 bg-emerald-500 rounded-full pulse-dot"></div>
+          <span class="text-emerald-600 font-medium">接続済み</span>`;
+        statEl.textContent = '接続中';
+        badgeEl.textContent = '接続済';
+        badgeEl.className = 'text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full';
+        
+        // Fill form
+        document.getElementById('channel-id').value = apiSettings.channel_id || '';
+        document.getElementById('channel-secret').value = apiSettings.channel_secret || '';
+        document.getElementById('access-token').value = apiSettings.access_token || '';
+        document.getElementById('webhook-url').value = apiSettings.webhook_url || '';
+      } else {
+        statusEl.innerHTML = `
+          <div class="w-3 h-3 bg-slate-400 rounded-full"></div>
+          <span class="text-slate-600">未設定</span>`;
+        statEl.textContent = '--';
+        badgeEl.textContent = '未設定';
+        badgeEl.className = 'text-xs font-medium text-slate-600 bg-slate-100 px-2 py-1 rounded-full';
+      }
+    }
+
+    document.getElementById('api-settings-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const btn = document.getElementById('save-api-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading-spinner"></span>';
+      
+      const existingSettings = getDataByType('api_settings')[0];
+      const settingsData = {
+        type: 'api_settings',
+        channel_id: document.getElementById('channel-id').value,
+        channel_secret: document.getElementById('channel-secret').value,
+        access_token: document.getElementById('access-token').value,
+        webhook_url: document.getElementById('webhook-url').value,
+        created_at: new Date().toISOString()
+      };
+      
+      let result;
+      if (existingSettings) {
+        result = await window.dataSdk.update({ ...existingSettings, ...settingsData });
+      } else {
+        if (allData.length >= 999) {
+          showToast('データ上限（999件）に達しました', 'error');
+          btn.disabled = false;
+          btn.innerHTML = '<span class="btn-text">設定を保存</span>';
+          return;
+        }
+        result = await window.dataSdk.create(settingsData);
+      }
+      
+      btn.disabled = false;
+      btn.innerHTML = '<span class="btn-text">設定を保存</span>';
+      
+      if (result.isOk) {
+        showToast('API設定を保存しました');
+      } else {
+        showToast('保存に失敗しました', 'error');
+      }
+    });
+
+    function generateWebhookUrl() {
+      const url = `https://your-server.com/webhook/${Date.now()}`;
+      document.getElementById('webhook-url').value = url;
+      showToast('Webhook URLを生成しました');
+    }
+
+    function testConnection() {
+      const channelId = document.getElementById('channel-id').value;
+      const accessToken = document.getElementById('access-token').value;
+      
+      if (!channelId || !accessToken) {
+        showToast('Channel IDとアクセストークンを入力してください', 'warning');
+        return;
+      }
+      
+      showToast('接続テスト中...このデモでは常に成功します');
+      setTimeout(() => {
+        showToast('接続テストに成功しました');
+      }, 1500);
+    }
+
+    // Students Management
+    function showStudentModal(student = null) {
+      const modal = document.getElementById('student-modal');
+      const form = document.getElementById('student-form');
+      
+      if (student) {
+        document.getElementById('student-edit-id').value = student.__backendId;
+        document.getElementById('student-name').value = student.student_name || '';
+        document.getElementById('student-line-id').value = student.student_line_id || '';
+        document.getElementById('student-course').value = student.course || '';
+        document.getElementById('student-status').value = student.status || '有効';
+      } else {
+        form.reset();
+        document.getElementById('student-edit-id').value = '';
+      }
+      
+      modal.classList.remove('hidden');
+    }
+
+    document.getElementById('student-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const btn = document.getElementById('save-student-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading-spinner"></span>';
+      
+      const editId = document.getElementById('student-edit-id').value;
+      const studentData = {
+        type: 'student',
+        student_name: document.getElementById('student-name').value,
+        student_line_id: document.getElementById('student-line-id').value,
+        course: document.getElementById('student-course').value,
+        status: document.getElementById('student-status').value,
+        created_at: new Date().toISOString()
+      };
+      
+      let result;
+      if (editId) {
+        const existingStudent = allData.find(d => d.__backendId === editId);
+        result = await window.dataSdk.update({ ...existingStudent, ...studentData });
+      } else {
+        if (allData.length >= 999) {
+          showToast('データ上限（999件）に達しました', 'error');
+          btn.disabled = false;
+          btn.innerHTML = '<span class="btn-text">保存</span>';
+          return;
+        }
+        result = await window.dataSdk.create(studentData);
+      }
+      
+      btn.disabled = false;
+      btn.innerHTML = '<span class="btn-text">保存</span>';
+      
+      if (result.isOk) {
+        showToast(editId ? '生徒情報を更新しました' : '生徒を登録しました');
+        closeModal('student-modal');
+      } else {
+        showToast('保存に失敗しました', 'error');
+      }
+    });
+
+    function renderStudentsList() {
+      const students = getDataByType('student');
+      const container = document.getElementById('students-list');
+      const searchTerm = document.getElementById('student-search')?.value?.toLowerCase() || '';
+      const filterCourse = document.getElementById('student-filter')?.value || '';
+      
+      let filteredStudents = students;
+      if (searchTerm) {
+        filteredStudents = filteredStudents.filter(s => 
+          (s.student_name || '').toLowerCase().includes(searchTerm)
+        );
+      }
+      if (filterCourse) {
+        filteredStudents = filteredStudents.filter(s => s.course === filterCourse);
+      }
+      
+      if (filteredStudents.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+            <p>${searchTerm || filterCourse ? '検索結果がありません' : '生徒がまだ登録されていません'}</p>
+            ${!searchTerm && !filterCourse ? '<button onclick="showStudentModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の生徒を登録 →</button>' : ''}
+          </div>`;
+        return;
+      }
+      
+      container.innerHTML = filteredStudents.map(student => `
+        <div class="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+          <div class="flex items-center gap-4">
+            <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-blue-600 rounded-xl flex items-center justify-center text-white font-bold">
+              ${(student.student_name || '?').substring(0, 1)}
+            </div>
+            <div>
+              <p class="font-medium text-slate-800">${student.student_name || '未設定'}</p>
+              <p class="text-sm text-slate-500">${student.course || ''} ${student.student_line_id ? '• LINE連携済' : ''}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="px-3 py-1 text-xs font-medium rounded-full ${student.status === '有効' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}">${student.status || '有効'}</span>
+            <button onclick='showStudentModal(${JSON.stringify(student).replace(/'/g, "\\'")})' class="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-500">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+            </button>
+            <button onclick="confirmDelete('student', '${student.__backendId}', '${student.student_name}')" class="p-2 hover:bg-red-50 rounded-lg transition-colors text-slate-500 hover:text-red-600">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('student-search')?.addEventListener('input', renderStudentsList);
+    document.getElementById('student-filter')?.addEventListener('change', renderStudentsList);
+
+    function updateStudentDropdown() {
+      const students = getDataByType('student').filter(s => s.status === '有効');
+      const dropdown = document.getElementById('schedule-student');
+      if (dropdown) {
+        dropdown.innerHTML = '<option value="">選択してください</option>' + 
+          students.map(s => `<option value="${s.student_name}">${s.student_name}</option>`).join('');
+      }
+    }
+
+    // Schedules Management
+    function showScheduleModal(schedule = null) {
+      const modal = document.getElementById('schedule-modal');
+      const form = document.getElementById('schedule-form');
+      
+      updateStudentDropdown();
+      
+      if (schedule) {
+        document.getElementById('schedule-edit-id').value = schedule.__backendId;
+        document.getElementById('schedule-date').value = schedule.schedule_date || '';
+        document.getElementById('schedule-time').value = schedule.schedule_time || '';
+        document.getElementById('schedule-student').value = schedule.student_name || '';
+        document.getElementById('schedule-subject').value = schedule.subject || '';
+        document.getElementById('schedule-instructor').value = schedule.instructor || '';
+        document.getElementById('schedule-attendance').value = schedule.attendance || '予定';
+      } else {
+        form.reset();
+        document.getElementById('schedule-edit-id').value = '';
+      }
+      
+      modal.classList.remove('hidden');
+    }
+
+    document.getElementById('schedule-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const btn = document.getElementById('save-schedule-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading-spinner"></span>';
+      
+      const editId = document.getElementById('schedule-edit-id').value;
+      const scheduleData = {
+        type: 'schedule',
+        schedule_date: document.getElementById('schedule-date').value,
+        schedule_time: document.getElementById('schedule-time').value,
+        student_name: document.getElementById('schedule-student').value,
+        subject: document.getElementById('schedule-subject').value,
+        instructor: document.getElementById('schedule-instructor').value,
+        attendance: document.getElementById('schedule-attendance').value,
+        created_at: new Date().toISOString()
+      };
+      
+      let result;
+      if (editId) {
+        const existingSchedule = allData.find(d => d.__backendId === editId);
+        result = await window.dataSdk.update({ ...existingSchedule, ...scheduleData });
+      } else {
+        if (allData.length >= 999) {
+          showToast('データ上限（999件）に達しました', 'error');
+          btn.disabled = false;
+          btn.innerHTML = '<span class="btn-text">保存</span>';
+          return;
+        }
+        result = await window.dataSdk.create(scheduleData);
+      }
+      
+      btn.disabled = false;
+      btn.innerHTML = '<span class="btn-text">保存</span>';
+      
+      if (result.isOk) {
+        showToast(editId ? '授業を更新しました' : '授業を登録しました');
+        closeModal('schedule-modal');
+      } else {
+        showToast('保存に失敗しました', 'error');
+      }
+    });
+
+    function renderSchedulesList() {
+      const schedules = getDataByType('schedule');
+      const container = document.getElementById('schedules-list');
+      const dateFilter = document.getElementById('schedule-date-filter')?.value || '';
+      const instructorFilter = document.getElementById('schedule-instructor-filter')?.value || '';
+      const statusFilter = document.getElementById('schedule-status-filter')?.value || '';
+      
+      let filteredSchedules = schedules;
+      if (dateFilter) {
+        filteredSchedules = filteredSchedules.filter(s => s.schedule_date === dateFilter);
+      }
+      if (instructorFilter) {
+        filteredSchedules = filteredSchedules.filter(s => s.instructor === instructorFilter);
+      }
+      if (statusFilter) {
+        filteredSchedules = filteredSchedules.filter(s => s.attendance === statusFilter);
+      }
+      
+      // Sort by date and time
+      filteredSchedules.sort((a, b) => {
+        const dateCompare = (a.schedule_date || '').localeCompare(b.schedule_date || '');
+        if (dateCompare !== 0) return dateCompare;
+        return (a.schedule_time || '').localeCompare(b.schedule_time || '');
+      });
+      
+      if (filteredSchedules.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+            <p>${dateFilter || instructorFilter || statusFilter ? '検索結果がありません' : '授業がまだ登録されていません'}</p>
+            ${!dateFilter && !instructorFilter && !statusFilter ? '<button onclick="showScheduleModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の授業を登録 →</button>' : ''}
+          </div>`;
+        return;
+      }
+      
+      container.innerHTML = filteredSchedules.map(schedule => `
+        <div class="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+          <div class="flex items-center gap-4">
+            <div class="text-center">
+              <p class="text-sm text-slate-500">${formatDate(schedule.schedule_date)}</p>
+              <p class="text-lg font-bold text-slate-800">${schedule.schedule_time ? schedule.schedule_time.substring(0, 5) : '--:--'}</p>
+            </div>
+            <div class="w-px h-12 bg-slate-200"></div>
+            <div>
+              <p class="font-medium text-slate-800">${schedule.student_name || '未設定'}</p>
+              <p class="text-sm text-slate-500">${schedule.subject || ''} - ${schedule.instructor || ''}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3">
+            <span class="px-3 py-1 text-xs font-medium rounded-full ${getStatusColor(schedule.attendance)}">${schedule.attendance || '予定'}</span>
+            <button onclick='showScheduleModal(${JSON.stringify(schedule).replace(/'/g, "\\'")})' class="p-2 hover:bg-slate-100 rounded-lg transition-colors text-slate-500">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+            </button>
+            <button onclick="confirmDelete('schedule', '${schedule.__backendId}', '${schedule.student_name}の授業')" class="p-2 hover:bg-red-50 rounded-lg transition-colors text-slate-500 hover:text-red-600">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('schedule-date-filter')?.addEventListener('change', renderSchedulesList);
+    document.getElementById('schedule-instructor-filter')?.addEventListener('change', renderSchedulesList);
+    document.getElementById('schedule-status-filter')?.addEventListener('change', renderSchedulesList);
+
+    // Reminder Settings
+    function saveReminderSettings() {
+      showToast('リマインド設定を保存しました');
+    }
+
+    // Notifications Management
+    function showNotificationModal() {
+      const modal = document.getElementById('notification-modal');
+      document.getElementById('notification-form').reset();
+      modal.classList.remove('hidden');
+    }
+
+    document.getElementById('notification-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const btn = document.getElementById('save-notification-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading-spinner"></span>';
+      
+      if (allData.length >= 999) {
+        showToast('データ上限（999件）に達しました', 'error');
+        btn.disabled = false;
+        btn.innerHTML = '<span class="btn-text">作成</span>';
+        return;
+      }
+      
+      const notificationData = {
+        type: 'notification',
+        notification_type: document.getElementById('notification-target').value,
+        notification_date: document.getElementById('notification-date').value || new Date().toISOString().split('T')[0],
+        notification_content: document.getElementById('notification-content').value,
+        notification_status: document.getElementById('notification-date').value ? '保留' : '送信済',
+        created_at: new Date().toISOString()
+      };
+      
+      const result = await window.dataSdk.create(notificationData);
+      
+      btn.disabled = false;
+      btn.innerHTML = '<span class="btn-text">作成</span>';
+      
+      if (result.isOk) {
+        showToast('告知を作成しました');
+        closeModal('notification-modal');
+      } else {
+        showToast('作成に失敗しました', 'error');
+      }
+    });
+
+    function renderNotificationsList() {
+      const notifications = getDataByType('notification');
+      const container = document.getElementById('notifications-list');
+      
+      if (notifications.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z"/></svg>
+            <p>告知がまだ作成されていません</p>
+            <button onclick="showNotificationModal()" class="mt-3 text-emerald-600 hover:text-emerald-700 font-medium">最初の告知を作成 →</button>
+          </div>`;
+        return;
+      }
+      
+      container.innerHTML = notifications.map(notification => `
+        <div class="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+          <div class="flex items-center gap-4 flex-1">
+            <div class="w-12 h-12 bg-purple-100 rounded-xl flex items-center justify-center">
+              <svg class="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5.882V19.24a1.76 1.76 0 01-3.417.592l-2.147-6.15M18 13a3 3 0 100-6M5.436 13.683A4.001 4.001 0 017 6h1.832c4.1 0 7.625-1.234 9.168-3v14c-1.543-1.766-5.067-3-9.168-3H7a3.988 3.988 0 01-1.564-.317z"/></svg>
+            </div>
+            <div class="flex-1">
+              <div class="flex items-center gap-2">
+                <span class="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">${notification.notification_type || '全生徒'}</span>
+                <span class="text-xs text-slate-500">${formatDate(notification.notification_date)}</span>
+              </div>
+              <p class="text-slate-800 mt-1 line-clamp-2">${notification.notification_content || ''}</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 ml-4">
+            <span class="px-3 py-1 text-xs font-medium rounded-full ${notification.notification_status === '送信済' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${notification.notification_status || '保留'}</span>
+            <button onclick="confirmDelete('notification', '${notification.__backendId}', 'この告知')" class="p-2 hover:bg-red-50 rounded-lg transition-colors text-slate-500 hover:text-red-600">
+              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // Logs
+    function renderLogsList() {
+      const notifications = getDataByType('notification');
+      const container = document.getElementById('logs-list');
+      
+      const logs = notifications.filter(n => n.notification_status === '送信済');
+      
+      if (logs.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center text-slate-400">
+            <svg class="w-12 h-12 mx-auto mb-3 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"/></svg>
+            <p>送信ログがありません</p>
+          </div>`;
+        return;
+      }
+      
+      container.innerHTML = logs.map(log => `
+        <div class="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+          <div class="flex items-center gap-4">
+            <div class="w-10 h-10 bg-emerald-100 rounded-full flex items-center justify-center">
+              <svg class="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            </div>
+            <div>
+              <p class="font-medium text-slate-800">${log.notification_type || '告知'}</p>
+              <p class="text-sm text-slate-500">${formatDate(log.notification_date)}</p>
+            </div>
+          </div>
+          <span class="px-3 py-1 text-xs font-medium rounded-full bg-emerald-100 text-emerald-700">成功</span>
+        </div>
+      `).join('');
+    }
+
+    // Delete confirmation
+    function confirmDelete(type, id, name) {
+      currentDeleteTarget = { type, id };
+      document.getElementById('delete-confirm-message').textContent = `「${name}」を削除しますか？この操作は取り消せません。`;
+      document.getElementById('delete-confirm-modal').classList.remove('hidden');
+    }
+
+    document.getElementById('delete-confirm-btn').addEventListener('click', async () => {
+      if (!currentDeleteTarget) return;
+      
+      const btn = document.getElementById('delete-confirm-btn');
+      btn.disabled = true;
+      btn.innerHTML = '<span class="loading-spinner"></span>';
+      
+      const item = allData.find(d => d.__backendId === currentDeleteTarget.id);
+      if (item) {
+        const result = await window.dataSdk.delete(item);
+        if (result.isOk) {
+          showToast('削除しました');
+        } else {
+          showToast('削除に失敗しました', 'error');
+        }
+      }
+      
+      btn.disabled = false;
+      btn.textContent = '削除する';
+      closeModal('delete-confirm-modal');
+      currentDeleteTarget = null;
+    });
+  </script>
+ </body>
+</html>
